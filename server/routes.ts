@@ -51,8 +51,27 @@ export async function registerRoutes(
   });
 
   app.post(api.messages.create.path, async (req, res) => {
-    const conversationId = Number(req.params.id);
-    const { content, sender, apiKey } = req.body;
+    // ========================================================================
+    // PHASE 2.1: ENFORCE conversation_id VALIDATION
+    // ========================================================================
+    const { conversation_id, content, sender, apiKey } = req.body;
+
+    // Validate conversation_id
+    if (!conversation_id) {
+      return res.status(400).json({
+        error: "conversation_id is required"
+      });
+    }
+
+    // Validate message content
+    if (!content || typeof content !== "string") {
+      return res.status(400).json({
+        error: "message is required"
+      });
+    }
+
+    // Use conversation_id from body (phase 2.1 requirement) or fallback to URL param
+    const conversationId = Number(conversation_id) || Number(req.params.id);
 
     // 1. Save the incoming message
     const newMessage = await storage.createMessage({
