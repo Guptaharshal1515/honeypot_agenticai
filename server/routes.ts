@@ -75,21 +75,28 @@ export async function registerRoutes(
       }
     }
 
-    // 3. Handoff logic: If agent is NOT active but a valid API key is provided for handoff
-    // For this demo, we'll assume "DEMO_KEY" is valid.
+    // 3. Trigger word detection & Handoff logic
+    const TRIGGER_WORDS = ['bank', 'upi', 'payment', 'amount', 'ifsc', 'code', 'id', 'account', 'transfer', 'send', 'money'];
+    const messageText = content?.toLowerCase() || '';
+    const hasTriggerWord = TRIGGER_WORDS.some(word => messageText.includes(word));
+
     const conversation = await storage.getConversation(conversationId);
 
-    // Track if this is a fresh handoff
-    const wasJustActivated = apiKey === "DEMO_KEY" && !conversation?.isAgentActive;
+    // Track if this is a fresh handoff (API key OR trigger word)
+    const wasJustActivated = (
+      (apiKey === "DEMO_KEY" && !conversation?.isAgentActive) ||  // Manual handoff
+      (hasTriggerWord && !conversation?.isAgentActive && sender === 'scammer')  // Auto-activate
+    );
 
-    // Auto-activate if handoff is initiated with API key
+    // Auto-activate if handoff is initiated
     if (wasJustActivated) {
       await storage.updateConversation(conversationId, { isAgentActive: true });
+      console.log(`🤖 Agent activated ${apiKey === "DEMO_KEY" ? 'via API key' : `via trigger word in "${content}"`}`);
     }
 
     const updatedConversation = await storage.getConversation(conversationId);
 
-    // 4. Agent turn control logic
+    // 5. Agent turn control logic
     // Agent should respond in two cases:
     // a) Fresh handoff → agent initiates the conversation
     // b) Agent is active and scammer sent a message → agent responds
@@ -100,6 +107,8 @@ export async function registerRoutes(
 
     if (shouldAgentRespond) {
       const history = await storage.getMessages(conversationId);
+
+      console.log(`🤖 Calling LLM agent (isInitiating: ${wasJustActivated})...`);
 
       try {
         const agentResponse = await generateAgentResponse(
@@ -115,9 +124,21 @@ export async function registerRoutes(
             content: agentResponse.content,
             metadata: agentResponse.metadata
           });
+          console.log(`✅ Agent responded: "${agentResponse.content.substring(0, 50)}..."`);
         }
       } catch (error) {
-        console.error("Agent generation failed:", error);
+        console.error("❌ AGENT FAILED:", error);
+        console.error("Error type:", error instanceof Error ? error.constructor.name : typeof error);
+        console.error("Error message:", error instanceof Error ? error.message : String(error));
+        console.error("Stack trace:", error instanceof Error ? error.stack : 'No stack');
+
+        // Create error message so user can see the failure
+        await storage.createMessage({
+          conversationId,
+          sender: 'agent',
+          content: `[AGENT ERROR: ${error instanceof Error ? error.message : 'LLM call failed - check GEMINI_API_KEY'}]`,
+          metadata: { error: true, errorMessage: String(error) }
+        });
       }
     }
 
