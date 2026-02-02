@@ -9,6 +9,52 @@ import { analyzeMessageForIntel } from "./scam_detection";
 import { generatePDFReport } from "./report";
 import { getOrCreateSession } from "./sessions";
 
+// PHASE 4.2: Risk score computation (judge-friendly, explainable)
+function computeRiskScore(session: any): number {
+  let score = 0.2; // Base suspicion
+
+  // Incremental risk based on extracted intel
+  if (session.extracted_intel.phone_numbers.length > 0) score += 0.15;
+  if (session.extracted_intel.upi_ids.length > 0) score += 0.25;
+  if (session.extracted_intel.bank_accounts.length > 0) score += 0.2;
+  if (session.extracted_intel.phishing_links.length > 0) score += 0.2;
+
+  // Exit state = confirmed scam
+  if (session.agent_state.current_goal === "EXIT_SAFELY" || !session.is_active) {
+    score = 1.0;
+  }
+
+  return Math.min(score, 1.0);
+}
+
+// PHASE 4.2: Risk label mapping for UI
+function getRiskLabel(score: number): string {
+  if (score < 0.3) return "SAFE";
+  if (score < 0.6) return "CAUTION";
+  return "HIGH RISK";
+}
+
+// PHASE 3.5: Confidence scoring function
+function computeConfidenceScore(session: any): number {
+  let score = 0;
+
+  // Rule-based scoring
+  if (session.extracted_intel.upi_ids.length > 0) score += 0.4;
+  if (session.extracted_intel.bank_accounts.length > 0) score += 0.3;
+  if (session.extracted_intel.phishing_links.length > 0) score += 0.3;
+
+  // Bonus for multiple pieces of evidence
+  const totalIntel =
+    session.extracted_intel.upi_ids.length +
+    session.extracted_intel.bank_accounts.length +
+    session.extracted_intel.phishing_links.length;
+
+  if (totalIntel >= 3) score = Math.min(score + 0.1, 1.0);
+
+  return Math.min(score, 1.0);
+}
+
+
 
 export async function registerRoutes(
   httpServer: Server,
@@ -242,53 +288,6 @@ export async function registerRoutes(
 
     res.status(201).json(responsePayload);
   });
-
-  // PHASE 4.2: Risk score computation (judge-friendly, explainable)
-  function computeRiskScore(session: any): number {
-    let score = 0.2; // Base suspicion
-
-    // Incremental risk based on extracted intel
-    if (session.extracted_intel.phone_numbers.length > 0) score += 0.15;
-    if (session.extracted_intel.upi_ids.length > 0) score += 0.25;
-    if (session.extracted_intel.bank_accounts.length > 0) score += 0.2;
-    if (session.extracted_intel.phishing_links.length > 0) score += 0.2;
-
-    // Exit state = confirmed scam
-    if (session.agent_state.current_goal === "EXIT_SAFELY" || !session.is_active) {
-      score = 1.0;
-    }
-
-    return Math.min(score, 1.0);
-  }
-
-  // PHASE 4.2: Risk label mapping for UI
-  function getRiskLabel(score: number): string {
-    if (score < 0.3) return "SAFE";
-    if (score < 0.6) return "CAUTION";
-    return "HIGH RISK";
-  }
-
-
-  // PHASE 3.5: Confidence scoring function
-  function computeConfidenceScore(session: any): number {
-    let score = 0;
-
-    // Rule-based scoring
-    if (session.extracted_intel.upi_ids.length > 0) score += 0.4;
-    if (session.extracted_intel.bank_accounts.length > 0) score += 0.3;
-    if (session.extracted_intel.phishing_links.length > 0) score += 0.3;
-
-    // Bonus for multiple pieces of evidence
-    const totalIntel =
-      session.extracted_intel.upi_ids.length +
-      session.extracted_intel.bank_accounts.length +
-      session.extracted_intel.phishing_links.length;
-
-    if (totalIntel >= 3) score = Math.min(score + 0.1, 1.0);
-
-    return Math.min(score, 1.0);
-  }
-
 
   // === Reports ===
   app.get(api.reports.list.path, async (req, res) => {

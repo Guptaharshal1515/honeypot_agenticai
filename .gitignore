@@ -9,3 +9,9 @@ vite.config.ts.*
 .env
 .env.local
 .env.*.local
+
+# Phase documentation (private implementation details)
+PHASE_*.md
+SUMMIT_*.md
+MASTER_SUMMARY.md
+DEMO_GUIDE.md
