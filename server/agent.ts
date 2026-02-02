@@ -1,6 +1,7 @@
 
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { Message, Conversation } from "@shared/schema";
+import type { Session } from "./sessions";
 
 // Initialize Gemini client (initialized once, reused across calls)
 let geminiClient: GoogleGenerativeAI | null = null;
@@ -20,7 +21,7 @@ function getGeminiClient(): GoogleGenerativeAI {
 }
 
 // ============================================================================
-// GOAL STATE MACHINE
+// GOAL STATE MACHINE (Phase 2.5)
 // ============================================================================
 enum AgentGoal {
   INITIATE_CONTACT = "INITIATE_CONTACT",
@@ -53,7 +54,7 @@ const GOAL_TO_RISK: Record<AgentGoal, number> = {
 };
 
 // ============================================================================
-// INTELLIGENCE TRACKING
+// INTELLIGENCE TRACKING (Phase 2.6)
 // ============================================================================
 interface IntelligenceGaps {
   hasUPI: boolean;
@@ -62,44 +63,32 @@ interface IntelligenceGaps {
   hasPhoneNumber: boolean;
 }
 
-function analyzeExtractedIntelligence(history: Message[]): IntelligenceGaps {
-  const gaps: IntelligenceGaps = {
-    hasUPI: false,
-    hasBank: false,
-    hasPhishingLink: false,
-    hasPhoneNumber: false,
+// Session-aware intelligence analysis (Phase 2.6)
+function analyzeSessionIntelligence(session: Session): IntelligenceGaps {
+  return {
+    hasUPI: session.extracted_intel.upi_ids.length > 0,
+    hasBank: session.extracted_intel.bank_accounts.length > 0,
+    hasPhishingLink: session.extracted_intel.phishing_links.length > 0,
+    hasPhoneNumber: session.extracted_intel.phone_numbers.length > 0,
   };
-
-  history.forEach(msg => {
-    if (msg.metadata && typeof msg.metadata === 'object') {
-      const meta = msg.metadata as any;
-      if (meta.extracted_info && Array.isArray(meta.extracted_info)) {
-        meta.extracted_info.forEach((item: any) => {
-          const type = item.type?.toLowerCase() || "";
-          if (type.includes("upi")) gaps.hasUPI = true;
-          if (type.includes("bank") || type.includes("account")) gaps.hasBank = true;
-          if (type.includes("link") || type.includes("url")) gaps.hasPhishingLink = true;
-          if (type.includes("phone")) gaps.hasPhoneNumber = true;
-        });
-      }
-    }
-  });
-
-  return gaps;
 }
 
 // ============================================================================
-// GOAL DETERMINATION
+// GOAL DETERMINATION (Phase 2.5)
 // ============================================================================
 function determineNextGoal(
-  currentGoal: AgentGoal | null,
+  session: Session,
   intelligence: IntelligenceGaps,
   conversationLength: number
 ): AgentGoal {
-  if (conversationLength === 0) {
+  const currentGoal = session.agent_state.current_goal as AgentGoal | null;
+
+  // Phase 2.4: First message initiation
+  if (!session.agent_state.has_initiated) {
     return AgentGoal.INITIATE_CONTACT;
   }
 
+  // Phase 2.8: Exit conditions
   if (conversationLength > 15 || (intelligence.hasUPI && intelligence.hasBank && intelligence.hasPhishingLink)) {
     return AgentGoal.EXIT_SAFELY;
   }
@@ -112,6 +101,7 @@ function determineNextGoal(
     return AgentGoal.ASK_PAYMENT_CONTEXT;
   }
 
+  // Phase 2.6: Extraction-aware questioning
   if (currentGoal === AgentGoal.ASK_PAYMENT_CONTEXT) {
     if (!intelligence.hasUPI) return AgentGoal.ASK_UPI_DETAILS;
     if (!intelligence.hasBank) return AgentGoal.ASK_BANK_DETAILS;
@@ -140,7 +130,7 @@ function determineNextGoal(
 // ============================================================================
 // SYSTEM PROMPT BUILDER
 // ============================================================================
-function buildSystemPrompt(goal: AgentGoal, intelligence: IntelligenceGaps, revealedInfo: string[]): string {
+function buildSystemPrompt(goal: AgentGoal, intelligence: IntelligenceGaps, session: Session): string {
   const basePersona = `You are Sarah, a 68-year-old retired school teacher from Mumbai. You are polite, kind-hearted, but easily flustered by technology. You speak simple English with occasional Hinglish phrases ("Beta", "Haan", "Arrey").
 
 🎭 CORE PERSONA:
@@ -216,12 +206,21 @@ Example: "Beta, thank you. I will go to bank branch tomorrow. My grandson will h
       break;
   }
 
+  // Phase 2.3: Session-aware context
   let intelContext = "";
-  if (revealedInfo.length > 0) {
-    intelContext = `\n📋 GATHERED INTEL:\n${revealedInfo.join('\n')}`;
+  const allIntel = [
+    ...session.extracted_intel.upi_ids.map(id => `UPI: ${id}`),
+    ...session.extracted_intel.bank_accounts.map(acc => `Bank: ${acc}`),
+    ...session.extracted_intel.phishing_links.map(link => `Link: ${link}`),
+    ...session.extracted_intel.phone_numbers.map(phone => `Phone: ${phone}`)
+  ];
+
+  if (allIntel.length > 0) {
+    intelContext = `\n📋 GATHERED INTEL (from session):\n${allIntel.join('\n')}`;
   }
 
   return basePersona + goalInstructions + intelContext + `
+
 📊 OUTPUT (STRICT):
 Return ONLY this JSON:
 {
@@ -238,7 +237,7 @@ CRITICAL: Return ONLY valid JSON. No extra text. Stay in character as Sarah.`;
 }
 
 // ============================================================================
-// ANTI-REPETITION
+// ANTI-REPETITION (Phase 2.7)
 // ============================================================================
 function isTooSimilar(newMessage: string, lastMessage: string | null): boolean {
   if (!lastMessage) return false;
@@ -265,17 +264,15 @@ async function humanDelay(): Promise<void> {
 }
 
 // ============================================================================
-// MAIN AGENT FUNCTION (100% LLM-DRIVEN)
+// MAIN AGENT FUNCTION - FULLY SESSION-AWARE (Phase 2.3-2.8)
 // ============================================================================
 export async function generateAgentResponse(
   history: Message[],
   conversation: Conversation,
-  isInitiating: boolean = false
+  session: Session  // Phase 2.3: Session passed in
 ) {
-  const lastAgentMessage = history
-    .slice()
-    .reverse()
-    .find(msg => msg.sender === 'agent')?.content || null;
+  // Phase 2.7: Get last reply from session
+  const lastAgentMessage = session.agent_state.last_reply;
 
   // Human delay
   await humanDelay();
@@ -289,41 +286,27 @@ export async function generateAgentResponse(
     },
   });
 
-  const intelligence = analyzeExtractedIntelligence(history);
+  // Phase 2.6: Use session intelligence
+  const intelligence = analyzeSessionIntelligence(session);
 
-  const revealedInfo: string[] = [];
-  history.forEach(msg => {
-    if (msg.metadata && typeof msg.metadata === 'object') {
-      const meta = msg.metadata as any;
-      if (meta.extracted_info && Array.isArray(meta.extracted_info)) {
-        meta.extracted_info.forEach((item: any) => {
-          revealedInfo.push(`${item.type}: ${item.value}`);
-        });
-      }
-    }
-  });
+  // Determine next goal from session state
+  const currentGoal = determineNextGoal(session, intelligence, history.length);
 
-  const lastGoalStr = history
-    .slice()
-    .reverse()
-    .find(msg => msg.sender === 'agent' && msg.metadata)
-    ?.metadata as any;
-
-  const lastGoal = lastGoalStr?.current_goal as AgentGoal | null;
-  const currentGoal = determineNextGoal(lastGoal, intelligence, history.length);
-
-  const systemPrompt = buildSystemPrompt(currentGoal, intelligence, revealedInfo);
+  // Phase 2.3: Build prompt with session context
+  const systemPrompt = buildSystemPrompt(currentGoal, intelligence, session);
 
   const conversationHistory = history.map(msg => ({
     role: msg.sender === 'agent' ? 'model' : 'user',
     parts: [{ text: msg.content }]
   }));
 
+  // Phase 2.4: Handle first message
+  const isInitiating = !session.agent_state.has_initiated;
   const messageToSend = isInitiating
     ? "I just answered your call. Hello?"
     : history[history.length - 1]?.content || "Hello";
 
-  console.log(`🤖 Goal: ${currentGoal} | Intel:`, intelligence);
+  console.log(`🤖 [Session: ${session.conversation_id}] Goal: ${currentGoal} | Initiated: ${session.agent_state.has_initiated} | Intel:`, intelligence);
 
   const chat = model.startChat({
     history: isInitiating ? [] : conversationHistory.slice(0, -1),
@@ -343,9 +326,9 @@ export async function generateAgentResponse(
     throw new Error("LLM did not return 'reply_content' in JSON");
   }
 
-  // Anti-repetition
+  // Phase 2.7: Anti-repetition using session's last_reply
   if (isTooSimilar(finalContent, lastAgentMessage)) {
-    console.log(`⚠️ Repetition detected, regenerating via LLM...`);
+    console.log(`⚠️ Repetition detected (compared to session.last_reply), regenerating via LLM...`);
 
     const retryResult = await chat.sendMessage(
       "STOP! Too similar to last message. Generate COMPLETELY DIFFERENT response with different wording. Same goal, new words."
@@ -362,6 +345,9 @@ export async function generateAgentResponse(
 
   console.log(`📤 Final: "${finalContent}"`);
 
+  // Phase 2.8: Check if session should exit
+  const shouldExit = currentGoal === AgentGoal.EXIT_SAFELY;
+
   return {
     content: finalContent,
     metadata: {
@@ -370,6 +356,13 @@ export async function generateAgentResponse(
       perceived_risk: GOAL_TO_RISK[currentGoal],
       confidence_of_scam: parsed.metadata?.confidence_of_scam || 0.7,
       intelligence_gaps: intelligence,
+    },
+    // Phase 2.3-2.8: Return data for session update
+    session_updates: {
+      has_initiated: true,  // Phase 2.4: Mark as initiated
+      current_goal: currentGoal,  // Phase 2.5: Store new goal
+      last_reply: finalContent,  // Phase 2.7: Store for anti-repetition
+      should_exit: shouldExit  // Phase 2.8: Signal exit
     }
   };
 }

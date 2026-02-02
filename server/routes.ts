@@ -100,6 +100,25 @@ export async function registerRoutes(
           intelValue: item.value,
           context: item.context
         });
+
+        // PHASE 2.6: Sync to session extracted_intel
+        const type = item.type?.toLowerCase() || "";
+        if (type.includes("upi") && !session.extracted_intel.upi_ids.includes(item.value)) {
+          session.extracted_intel.upi_ids.push(item.value);
+          console.log(`📊 [Session Intel] Added UPI: ${item.value}`);
+        }
+        if ((type.includes("bank") || type.includes("account")) && !session.extracted_intel.bank_accounts.includes(item.value)) {
+          session.extracted_intel.bank_accounts.push(item.value);
+          console.log(`📊 [Session Intel] Added Bank: ${item.value}`);
+        }
+        if ((type.includes("link") || type.includes("url")) && !session.extracted_intel.phishing_links.includes(item.value)) {
+          session.extracted_intel.phishing_links.push(item.value);
+          console.log(`📊 [Session Intel] Added Link: ${item.value}`);
+        }
+        if (type.includes("phone") && !session.extracted_intel.phone_numbers.includes(item.value)) {
+          session.extracted_intel.phone_numbers.push(item.value);
+          console.log(`📊 [Session Intel] Added Phone: ${item.value}`);
+        }
       }
     }
 
@@ -128,30 +147,53 @@ export async function registerRoutes(
     // Agent should respond in two cases:
     // a) Fresh handoff → agent initiates the conversation
     // b) Agent is active and scammer sent a message → agent responds
+    // PHASE 2.8.3: Check if session is still active
+    // Note: We DON'T block with hardcoded messages (national summit requirement)
+    // Instead, agent will continue to respond via LLM in EXIT state
     const shouldAgentRespond = updatedConversation?.isAgentActive && (
       wasJustActivated ||  // Fresh handoff = agent initiates
       sender === 'scammer'  // Scammer message = agent responds
     );
 
+
     if (shouldAgentRespond) {
       const history = await storage.getMessages(conversationId);
 
-      console.log(`🤖 Calling LLM agent (isInitiating: ${wasJustActivated})...`);
+      console.log(`🤖 Calling LLM agent (session-aware, initiated: ${session.agent_state.has_initiated})...`);
 
       try {
+        // PHASE 2.3: Pass session to agent
         const agentResponse = await generateAgentResponse(
           history,
           updatedConversation,
-          wasJustActivated  // Pass initiation flag
+          session  // Session replaces isInitiating flag
         );
 
         if (agentResponse) {
+          // Save agent message
           await storage.createMessage({
             conversationId,
             sender: 'agent',
             content: agentResponse.content,
             metadata: agentResponse.metadata
           });
+
+          // PHASE 2.4, 2.5, 2.7: Update session state
+          if (agentResponse.session_updates) {
+            session.agent_state.has_initiated = agentResponse.session_updates.has_initiated;
+            session.agent_state.current_goal = agentResponse.session_updates.current_goal;
+            session.agent_state.last_reply = agentResponse.session_updates.last_reply;
+
+            // PHASE 2.8: Mark session inactive if exit
+            if (agentResponse.session_updates.should_exit) {
+              session.is_active = false;
+              await storage.updateConversation(conversationId, { isAgentActive: false });
+              console.log(`🛑 Session ${session.conversation_id} marked inactive (EXIT_SAFELY)`);
+            }
+
+            console.log(`✅ Session updated: goal=${session.agent_state.current_goal}, has_initiated=${session.agent_state.has_initiated}`);
+          }
+
           console.log(`✅ Agent responded: "${agentResponse.content.substring(0, 50)}..."`);
         }
       } catch (error) {
@@ -170,8 +212,41 @@ export async function registerRoutes(
       }
     }
 
-    res.status(201).json(newMessage);
+    // PHASE 3.4 & 3.5: Return structured response with extracted intel and confidence
+    const responsePayload = {
+      ...newMessage,
+      extracted_intel: {
+        upi_ids: session.extracted_intel.upi_ids,
+        bank_accounts: session.extracted_intel.bank_accounts,
+        phishing_links: session.extracted_intel.phishing_links,
+        phone_numbers: session.extracted_intel.phone_numbers
+      },
+      confidence_score: computeConfidenceScore(session)
+    };
+
+    res.status(201).json(responsePayload);
   });
+
+  // PHASE 3.5: Confidence scoring function
+  function computeConfidenceScore(session: any): number {
+    let score = 0;
+
+    // Rule-based scoring
+    if (session.extracted_intel.upi_ids.length > 0) score += 0.4;
+    if (session.extracted_intel.bank_accounts.length > 0) score += 0.3;
+    if (session.extracted_intel.phishing_links.length > 0) score += 0.3;
+
+    // Bonus for multiple pieces of evidence
+    const totalIntel =
+      session.extracted_intel.upi_ids.length +
+      session.extracted_intel.bank_accounts.length +
+      session.extracted_intel.phishing_links.length;
+
+    if (totalIntel >= 3) score = Math.min(score + 0.1, 1.0);
+
+    return Math.min(score, 1.0);
+  }
+
 
   // === Reports ===
   app.get(api.reports.list.path, async (req, res) => {

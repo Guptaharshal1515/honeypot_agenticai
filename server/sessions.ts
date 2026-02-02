@@ -2,14 +2,16 @@ export type Session = {
     conversation_id: string;
     created_at: number;
     last_active: number;
+    is_active: boolean;  // Phase 2.8: Session lifecycle control
 
-    // agent-related state (will expand later)
+    // agent-related state
     agent_state: {
-        has_initiated: boolean;
-        current_goal: string | null;
+        has_initiated: boolean;  // Phase 2.4: First message control
+        current_goal: string | null;  // Phase 2.5: Goal tracking
+        last_reply: string | null;  // Phase 2.7: Anti-repetition
     };
 
-    // extracted intel (empty for now)
+    // Phase 2.6: Extraction-aware intel storage
     extracted_intel: {
         upi_ids: string[];
         bank_accounts: string[];
@@ -31,9 +33,11 @@ export function getOrCreateSession(conversation_id: string): Session {
             conversation_id,
             created_at: now,
             last_active: now,
+            is_active: true,  // New sessions start active
             agent_state: {
                 has_initiated: false,
-                current_goal: null
+                current_goal: null,
+                last_reply: null  // Phase 2.7
             },
             extracted_intel: {
                 upi_ids: [],
