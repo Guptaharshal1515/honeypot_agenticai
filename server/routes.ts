@@ -12,7 +12,7 @@ export async function registerRoutes(
   httpServer: Server,
   app: Express
 ): Promise<Server> {
-  
+
   // === Conversations ===
   app.get(api.conversations.list.path, async (req, res) => {
     const convs = await storage.getConversations();
@@ -21,9 +21,9 @@ export async function registerRoutes(
 
   app.post(api.conversations.create.path, async (req, res) => {
     const conv = await storage.createConversation({
-        title: req.body.title || "New Scam Chat",
-        status: "active",
-        isAgentActive: true
+      title: req.body.title || "New Scam Chat",
+      status: "active",
+      isAgentActive: true
     });
     res.status(201).json(conv);
   });
@@ -67,10 +67,10 @@ export async function registerRoutes(
       const intel = analyzeMessageForIntel(content);
       for (const item of intel) {
         await storage.createScamReport({
-            conversationId,
-            intelType: item.type,
-            intelValue: item.value,
-            context: item.context
+          conversationId,
+          intelType: item.type,
+          intelValue: item.value,
+          context: item.context
         });
       }
     }
@@ -78,32 +78,47 @@ export async function registerRoutes(
     // 3. Handoff logic: If agent is NOT active but a valid API key is provided for handoff
     // For this demo, we'll assume "DEMO_KEY" is valid.
     const conversation = await storage.getConversation(conversationId);
-    
+
+    // Track if this is a fresh handoff
+    const wasJustActivated = apiKey === "DEMO_KEY" && !conversation?.isAgentActive;
+
     // Auto-activate if handoff is initiated with API key
-    if (apiKey === "DEMO_KEY" && !conversation?.isAgentActive) {
-        await storage.updateConversation(conversationId, { isAgentActive: true });
+    if (wasJustActivated) {
+      await storage.updateConversation(conversationId, { isAgentActive: true });
     }
 
     const updatedConversation = await storage.getConversation(conversationId);
 
-    // 4. If agent is active and sender is scammer, trigger agent response
-    if (updatedConversation?.isAgentActive && sender === 'scammer') {
-       const history = await storage.getMessages(conversationId);
-       
-       try {
-           const agentResponse = await generateAgentResponse(history, updatedConversation);
-           
-           if (agentResponse) {
-               await storage.createMessage({
-                   conversationId,
-                   sender: 'agent',
-                   content: agentResponse.content,
-                   metadata: agentResponse.metadata
-               });
-           }
-       } catch (error) {
-           console.error("Agent generation failed:", error);
-       }
+    // 4. Agent turn control logic
+    // Agent should respond in two cases:
+    // a) Fresh handoff → agent initiates the conversation
+    // b) Agent is active and scammer sent a message → agent responds
+    const shouldAgentRespond = updatedConversation?.isAgentActive && (
+      wasJustActivated ||  // Fresh handoff = agent initiates
+      sender === 'scammer'  // Scammer message = agent responds
+    );
+
+    if (shouldAgentRespond) {
+      const history = await storage.getMessages(conversationId);
+
+      try {
+        const agentResponse = await generateAgentResponse(
+          history,
+          updatedConversation,
+          wasJustActivated  // Pass initiation flag
+        );
+
+        if (agentResponse) {
+          await storage.createMessage({
+            conversationId,
+            sender: 'agent',
+            content: agentResponse.content,
+            metadata: agentResponse.metadata
+          });
+        }
+      } catch (error) {
+        console.error("Agent generation failed:", error);
+      }
     }
 
     res.status(201).json(newMessage);
@@ -120,11 +135,11 @@ export async function registerRoutes(
     const conversation = await storage.getConversation(conversationId);
     const messages = await storage.getMessages(conversationId);
     const reports = await storage.getScamReports(conversationId);
-    
+
     if (!conversation) return res.status(404).send("Conversation not found");
 
     const pdfBuffer = await generatePDFReport(conversation, messages, reports);
-    
+
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=scam-report-${conversationId}.pdf`);
     res.send(pdfBuffer);
@@ -133,27 +148,27 @@ export async function registerRoutes(
   // Seed Data (if empty)
   const existingConvs = await storage.getConversations();
   if (existingConvs.length === 0) {
-      console.log("Seeding database...");
-      const conv = await storage.createConversation({
-          title: "Suspected IRS Scam",
-          status: "active",
-          scamScore: 45,
-          isAgentActive: false, // Manual mode first
-          scammerName: "+1 (555) 012-3456"
-      });
-      
-      await storage.createMessage({
-          conversationId: conv.id,
-          sender: "scammer",
-          content: "Hello, this is Officer John from the IRS. You have pending tax dues of $5000. Pay immediately or police will come."
-      });
-      
-      await storage.createScamReport({
-          conversationId: conv.id,
-          intelType: "phone",
-          intelValue: "5550123456",
-          context: "Caller ID"
-      });
+    console.log("Seeding database...");
+    const conv = await storage.createConversation({
+      title: "Suspected IRS Scam",
+      status: "active",
+      scamScore: 45,
+      isAgentActive: false, // Manual mode first
+      scammerName: "+1 (555) 012-3456"
+    });
+
+    await storage.createMessage({
+      conversationId: conv.id,
+      sender: "scammer",
+      content: "Hello, this is Officer John from the IRS. You have pending tax dues of $5000. Pay immediately or police will come."
+    });
+
+    await storage.createScamReport({
+      conversationId: conv.id,
+      intelType: "phone",
+      intelValue: "5550123456",
+      context: "Caller ID"
+    });
   }
 
   return httpServer;
