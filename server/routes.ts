@@ -325,7 +325,37 @@ export async function registerRoutes(
 
   app.post(api.messages.create.path, async (req, res) => {
     // ========================================================================
-    // FLEXIBLE INPUT PARSING for official tester compatibility
+    // HACKATHON COMPATIBILITY ADAPTER (Impact AI Hackathon)
+    // ========================================================================
+    // Detect if request is from official tester: has sessionId + message.text
+    const isHackathonFormat = req.body.sessionId && req.body.message?.text;
+
+    if (isHackathonFormat) {
+      console.log('🎯 [HACKATHON] Detected official tester format');
+
+      try {
+        // Use the honeypot handler for hackathon requests
+        const result = await handleHoneypotMessage(req.body);
+
+        // Return STRICT format required by hackathon
+        return res.status(200).json({
+          status: result.status,
+          reply: result.reply
+        });
+
+      } catch (error) {
+        console.error('❌ [HACKATHON] Error:', error);
+
+        // Even on error, return valid JSON in required format
+        return res.status(200).json({
+          status: 'error',
+          reply: 'Invalid request'
+        });
+      }
+    }
+
+    // ========================================================================
+    // EXISTING UI LOGIC (Preserve all functionality below)
     // ========================================================================
 
     // Accept API key from header OR body
