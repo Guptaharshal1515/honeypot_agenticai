@@ -1,28 +1,11 @@
 
-import { GoogleGenerativeAI } from "@google/generative-ai";
 import type { Message, Conversation } from "@shared/schema";
 import type { Session } from "./sessions";
 
-// Initialize Gemini client (initialized once, reused across calls)
-let geminiClient: GoogleGenerativeAI | null = null;
-
-function getGeminiClient(): GoogleGenerativeAI {
-  if (!geminiClient) {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
-      throw new Error(
-        "GEMINI_API_KEY environment variable is not set. " +
-        "The agent cannot function without an LLM API key."
-      );
-    }
-    geminiClient = new GoogleGenerativeAI(apiKey);
-  }
-  return geminiClient;
-}
-
 // ============================================================================
-// GOAL STATE MACHINE (Phase 2.5)
+// MOCK AGENT - NO API CALLS
 // ============================================================================
+
 enum AgentGoal {
   INITIATE_CONTACT = "INITIATE_CONTACT",
   ENGAGE_AND_STALL = "ENGAGE_AND_STALL",
@@ -53,9 +36,74 @@ const GOAL_TO_RISK: Record<AgentGoal, number> = {
   [AgentGoal.EXIT_SAFELY]: 0.8,
 };
 
-// ============================================================================
-// INTELLIGENCE TRACKING (Phase 2.6)
-// ============================================================================
+// Mock response templates for each goal
+// PERSONA: Sarah, 68, retired teacher, nervous, not tech-savvy
+// RULES: Max 1-2 short sentences, broken English, 1 emoji max (😟 😰), light Hinglish
+const RESPONSE_TEMPLATES: Record<AgentGoal, string[]> = {
+  [AgentGoal.INITIATE_CONTACT]: [
+    "Hello? Who is this?",
+    "Ji... you called? What happened?",
+    "Namaste beta. Is everything okay?",
+    "Hello... I got missed call...",
+    "Beta who is speaking? I am Sarah."
+  ],
+  [AgentGoal.ENGAGE_AND_STALL]: [
+    "Haan haan... I'm listening beta.",
+    "Wait... my phone is slow. Say again?",
+    "Arre... I didn't understand 😟",
+    "Beta speak slowly please...",
+    "Okay okay... but which button?",
+    "My grandson usually helps me beta...",
+    "I get confused easily... sorry beta."
+  ],
+  [AgentGoal.ASK_PAYMENT_CONTEXT]: [
+    "Which app to use beta?",
+    "Should I go to bank?",
+    "PhonePe or Google Pay?",
+    "I have Paytm also... which one?",
+    "How to send beta?",
+    "Cash or online?"
+  ],
+  [AgentGoal.ASK_UPI_DETAILS]: [
+    "UPI id kya hai beta?",
+    "Where to send? Tell UPI.",
+    "What is your UPI?",
+    "Beta... which UPI id?",
+    "Spell the UPI slowly...",
+    "Phone number ka UPI?",
+    "UPI id batao beta..."
+  ],
+  [AgentGoal.ASK_BANK_DETAILS]: [
+    "UPI not working 😟\nAccount number?",
+    "App crashed beta.\nBank details please?",
+    "This is showing error...\nAccount number batao?",
+    "I'll do bank transfer.\nAccount and IFSC?",
+    "Which bank beta?",
+    "Account number kya hai?",
+    "IFSC code also?",
+    "My phone is hanging...\nJust tell account number?",
+    "App is stuck.\nI'll use net banking... details?",
+    "This app... not working.\nBank account?"
+  ],
+  [AgentGoal.ASK_PHISHING_LINK]: [
+    "Any website beta?",
+    "Link hai kya?",
+    "My son said check website first 😟",
+    "Can you send link?",
+    "Whatsapp me link send karo?",
+    "Any portal or app?",
+    "Website link please beta..."
+  ],
+  [AgentGoal.EXIT_SAFELY]: [
+    "Okay beta... I will do tomorrow.",
+    "Let me ask my son first...",
+    "I'll go to bank branch beta.",
+    "Thank you... I'll call you back.",
+    "Noted beta. Will do from bank.",
+    "My grandson will help me... bye beta."
+  ]
+};
+
 interface IntelligenceGaps {
   hasUPI: boolean;
   hasBank: boolean;
@@ -63,7 +111,6 @@ interface IntelligenceGaps {
   hasPhoneNumber: boolean;
 }
 
-// Session-aware intelligence analysis (Phase 2.6)
 function analyzeSessionIntelligence(session: Session): IntelligenceGaps {
   return {
     hasUPI: session.extracted_intel.upi_ids.length > 0,
@@ -73,9 +120,6 @@ function analyzeSessionIntelligence(session: Session): IntelligenceGaps {
   };
 }
 
-// ============================================================================
-// GOAL DETERMINATION (Phase 2.5)
-// ============================================================================
 function determineNextGoal(
   session: Session,
   intelligence: IntelligenceGaps,
@@ -83,269 +127,146 @@ function determineNextGoal(
 ): AgentGoal {
   const currentGoal = session.agent_state.current_goal as AgentGoal | null;
 
-  // Phase 2.4: First message initiation
+  // First message - initiate contact
   if (!session.agent_state.has_initiated) {
     return AgentGoal.INITIATE_CONTACT;
   }
 
-  // Phase 2.8: Exit conditions
-  if (conversationLength > 15 || (intelligence.hasUPI && intelligence.hasBank && intelligence.hasPhishingLink)) {
+  // Only exit if BOTH conditions met: long conversation AND lots of intel
+  // This makes agent more persistent
+  if (conversationLength > 20 && (intelligence.hasUPI && intelligence.hasBank && intelligence.hasPhishingLink)) {
     return AgentGoal.EXIT_SAFELY;
   }
 
+  // After initiating, engage and build trust
   if (!currentGoal || currentGoal === AgentGoal.INITIATE_CONTACT) {
     return AgentGoal.ENGAGE_AND_STALL;
   }
 
+  // After engaging for a bit, start asking about payment
   if (currentGoal === AgentGoal.ENGAGE_AND_STALL && conversationLength > 2) {
     return AgentGoal.ASK_PAYMENT_CONTEXT;
   }
 
-  // Phase 2.6: Extraction-aware questioning
+  // CORE PERSISTENCE LOGIC: Keep cycling through information requests
+  // Don't give up just because one attempt failed
+
   if (currentGoal === AgentGoal.ASK_PAYMENT_CONTEXT) {
+    // Try UPI first
     if (!intelligence.hasUPI) return AgentGoal.ASK_UPI_DETAILS;
+    // If UPI failed, try bank account
     if (!intelligence.hasBank) return AgentGoal.ASK_BANK_DETAILS;
+    // If both failed, ask for website/link
     if (!intelligence.hasPhishingLink) return AgentGoal.ASK_PHISHING_LINK;
-    return AgentGoal.EXIT_SAFELY;
+    // Got everything from payment context, go back to engaging
+    return AgentGoal.ENGAGE_AND_STALL;
   }
 
+  // If asking for UPI didn't work, try other approaches
   if (currentGoal === AgentGoal.ASK_UPI_DETAILS) {
+    // If we didn't get UPI but conversation is short, try bank account instead
     if (!intelligence.hasBank) return AgentGoal.ASK_BANK_DETAILS;
+    // Try phishing link
     if (!intelligence.hasPhishingLink) return AgentGoal.ASK_PHISHING_LINK;
-    return AgentGoal.EXIT_SAFELY;
+    // Cycle back to UPI with different approach
+    return AgentGoal.ASK_PAYMENT_CONTEXT;
   }
 
+  // If bank account request didn't work, keep trying other methods
   if (currentGoal === AgentGoal.ASK_BANK_DETAILS) {
+    // Try getting website/link
     if (!intelligence.hasPhishingLink) return AgentGoal.ASK_PHISHING_LINK;
-    return AgentGoal.EXIT_SAFELY;
+    // Cycle back to UPI
+    if (!intelligence.hasUPI) return AgentGoal.ASK_UPI_DETAILS;
+    // Keep asking about payment in general
+    return AgentGoal.ASK_PAYMENT_CONTEXT;
   }
 
+  // If phishing link request was denied, keep trying other information
   if (currentGoal === AgentGoal.ASK_PHISHING_LINK) {
-    return AgentGoal.EXIT_SAFELY;
+    // DON'T EXIT! Try other approaches instead
+    // If we still don't have bank details, ask for that
+    if (!intelligence.hasBank) return AgentGoal.ASK_BANK_DETAILS;
+    // If we still don't have UPI, ask for that
+    if (!intelligence.hasUPI) return AgentGoal.ASK_UPI_DETAILS;
+    // Otherwise, engage more and build trust before asking again
+    return AgentGoal.ENGAGE_AND_STALL;
   }
 
-  return AgentGoal.EXIT_SAFELY;
+  // Default: keep engaging
+  return AgentGoal.ENGAGE_AND_STALL;
 }
 
-// ============================================================================
-// SYSTEM PROMPT BUILDER
-// ============================================================================
-function buildSystemPrompt(goal: AgentGoal, intelligence: IntelligenceGaps, session: Session): string {
-  const basePersona = `You are Sarah, a 68-year-old retired school teacher from Mumbai. You are polite, kind-hearted, but easily flustered by technology. You speak simple English with occasional Hinglish phrases ("Beta", "Haan", "Arrey").
-
-🎭 CORE PERSONA:
-- NOT tech-savvy, struggle with apps
-- CAUTIOUS but TRUSTING
-- Get emotional easily: worried, confused, apologetic
-- Use Hinglish occasionally
-
-🛡️ SAFETY RULES:
-- NEVER provide real UPI IDs, bank accounts, OTPs, PINs
-- Use excuses: "App says invalid", "I forgot my PIN", "No OTP received"
-`;
-
-  let goalInstructions = "";
-  switch (goal) {
-    case AgentGoal.INITIATE_CONTACT:
-      goalInstructions = `
-🎯 GOAL: INITIATE CONTACT
-Greet them politely and ask WHO they are. Express slight confusion. Be friendly but cautious. Keep it short (2-3 sentences).
-Example: "Hello? Who is this? I got a call from this number... Is everything okay?"
-`;
-      break;
-
-    case AgentGoal.ENGAGE_AND_STALL:
-      goalInstructions = `
-🎯 GOAL: ENGAGE & STALL
-Waste time by being slow. Ask them to repeat. Show willingness but be slow. Longer messages (3-5 sentences).
-Example: "Oh beta, you are so kind. But I'm not understanding. Which button should I click?"
-`;
-      break;
-
-    case AgentGoal.ASK_PAYMENT_CONTEXT:
-      goalInstructions = `
-🎯 GOAL: ASK ABOUT PAYMENT
-Ask HOW to make payment. Express confusion about methods. Medium length (3-4 sentences).
-Example: "Beta, should I use PhonePe or Google Pay? Or should I go to the bank?"
-`;
-      break;
-
-    case AgentGoal.ASK_UPI_DETAILS:
-      goalInstructions = `
-🎯 GOAL: GET UPI ID
-${!intelligence.hasUPI ? "You MUST ask for their UPI ID." : "You already have UPI."}
-Ask "What is your UPI ID?" or "Where should I send?" Short, anxious (2-3 sentences).
-Example: "Okay beta, I opened Google Pay. Where do I send? What should I type?"
-`;
-      break;
-
-    case AgentGoal.ASK_BANK_DETAILS:
-      goalInstructions = `
-🎯 GOAL: GET BANK ACCOUNT
-${!intelligence.hasBank ? "You MUST ask for bank account." : "You already have bank details."}
-Say UPI app is "not working". Ask for bank account. Very short (1-2 sentences).
-Example: "This app is giving error. Give me your bank account number instead."
-`;
-      break;
-
-    case AgentGoal.ASK_PHISHING_LINK:
-      goalInstructions = `
-🎯 GOAL: GET LINK
-${!intelligence.hasPhishingLink ? "You MUST ask for website/link." : "You already have link."}
-Ask "Do you have a website?" or "Send me a link?". Hesitant (2 sentences).
-Example: "Beta, do you have any website? My son said check website first..."
-`;
-      break;
-
-    case AgentGoal.EXIT_SAFELY:
-      goalInstructions = `
-🎯 GOAL: EXIT
-Exit politely. Say you will "visit bank tomorrow" or "ask family first".
-Example: "Beta, thank you. I will go to bank branch tomorrow. My grandson will help me."
-`;
-      break;
-  }
-
-  // Phase 2.3: Session-aware context
-  let intelContext = "";
-  const allIntel = [
-    ...session.extracted_intel.upi_ids.map(id => `UPI: ${id}`),
-    ...session.extracted_intel.bank_accounts.map(acc => `Bank: ${acc}`),
-    ...session.extracted_intel.phishing_links.map(link => `Link: ${link}`),
-    ...session.extracted_intel.phone_numbers.map(phone => `Phone: ${phone}`)
-  ];
-
-  if (allIntel.length > 0) {
-    intelContext = `\n📋 GATHERED INTEL (from session):\n${allIntel.join('\n')}`;
-  }
-
-  return basePersona + goalInstructions + intelContext + `
-
-📊 OUTPUT (STRICT):
-Return ONLY this JSON:
-{
-  "reply_content": "Your message as Sarah",
-  "metadata": {
-    "current_goal": "${goal}",
-    "emotional_state": "${GOAL_TO_EMOTION[goal]}",
-    "perceived_risk": ${GOAL_TO_RISK[goal]},
-    "confidence_of_scam": 0.0-1.0
-  }
-}
-
-CRITICAL: Return ONLY valid JSON. No extra text. Stay in character as Sarah.`;
-}
-
-// ============================================================================
-// ANTI-REPETITION (Phase 2.7)
-// ============================================================================
-function isTooSimilar(newMessage: string, lastMessage: string | null): boolean {
-  if (!lastMessage) return false;
-
-  const normalize = (text: string) => text.toLowerCase().replace(/[^a-z0-9]/g, '');
-  const newNorm = normalize(newMessage);
-  const lastNorm = normalize(lastMessage);
-
-  if (newNorm === lastNorm) return true;
-
-  const newChars = Array.from(newNorm);
-  const overlap = newChars.filter(char => lastNorm.includes(char)).length;
-  const similarity = overlap / Math.max(newNorm.length, lastNorm.length);
-
-  return similarity > 0.8;
-}
-
-// ============================================================================
-// HUMAN DELAY
-// ============================================================================
 async function humanDelay(): Promise<void> {
-  const delayMs = 2000 + Math.random() * 2000;
+  // Simulate elderly person typing slowly (4-8 seconds)
+  const delayMs = 4000 + Math.random() * 4000;
   return new Promise(resolve => setTimeout(resolve, delayMs));
 }
 
-// ============================================================================
-// MAIN AGENT FUNCTION - FULLY SESSION-AWARE (Phase 2.3-2.8)
-// ============================================================================
 export async function generateAgentResponse(
   history: Message[],
   conversation: Conversation,
-  session: Session  // Phase 2.3: Session passed in
+  session: Session
 ) {
-  // Phase 2.7: Get last reply from session
-  const lastAgentMessage = session.agent_state.last_reply;
+  console.log("🤖 [MOCK MODE] Generating response without API...");
 
   // Human delay
   await humanDelay();
 
-  const genAI = getGeminiClient();
-  const model = genAI.getGenerativeModel({
-    model: "gemini-1.5-flash",
-    generationConfig: {
-      temperature: 0.85,
-      responseMimeType: "application/json",
-    },
-  });
-
-  // Phase 2.6: Use session intelligence
+  // Analyze session intelligence
   const intelligence = analyzeSessionIntelligence(session);
 
-  // Determine next goal from session state
+  // Determine next goal
   const currentGoal = determineNextGoal(session, intelligence, history.length);
 
-  // Phase 2.3: Build prompt with session context
-  const systemPrompt = buildSystemPrompt(currentGoal, intelligence, session);
+  // FIX ISSUE #2: Hard guard against re-initiation mid-conversation
+  // If agent has already initiated, NEVER allow INITIATE_CONTACT again
+  if (session.agent_state.has_initiated && currentGoal === AgentGoal.INITIATE_CONTACT) {
+    console.log("⚠️ [GUARD] Prevented re-initiation - forcing ENGAGE_AND_STALL instead");
+    const templates = RESPONSE_TEMPLATES[AgentGoal.ENGAGE_AND_STALL];
+    const finalContent = templates[Math.floor(Math.random() * templates.length)];
 
-  const conversationHistory = history.map(msg => ({
-    role: msg.sender === 'agent' ? 'model' : 'user',
-    parts: [{ text: msg.content }]
-  }));
-
-  // Phase 2.4: Handle first message
-  const isInitiating = !session.agent_state.has_initiated;
-  const messageToSend = isInitiating
-    ? "I just answered your call. Hello?"
-    : history[history.length - 1]?.content || "Hello";
-
-  console.log(`🤖 [Session: ${session.conversation_id}] Goal: ${currentGoal} | Initiated: ${session.agent_state.has_initiated} | Intel:`, intelligence);
-
-  const chat = model.startChat({
-    history: isInitiating ? [] : conversationHistory.slice(0, -1),
-    systemInstruction: systemPrompt,
-  });
-
-  // LLM CALL (NO FALLBACKS)
-  const result = await chat.sendMessage(messageToSend);
-  const responseText = result.response.text();
-
-  console.log(`✅ LLM Response: ${responseText.substring(0, 150)}`);
-
-  const parsed = JSON.parse(responseText);
-  let finalContent = parsed.reply_content;
-
-  if (!finalContent) {
-    throw new Error("LLM did not return 'reply_content' in JSON");
+    return {
+      content: finalContent,
+      metadata: {
+        current_goal: AgentGoal.ENGAGE_AND_STALL,
+        emotional_state: GOAL_TO_EMOTION[AgentGoal.ENGAGE_AND_STALL],
+        perceived_risk: GOAL_TO_RISK[AgentGoal.ENGAGE_AND_STALL],
+        confidence_of_scam: 0.7,
+        intelligence_gaps: intelligence,
+      },
+      session_updates: {
+        has_initiated: true,
+        current_goal: AgentGoal.ENGAGE_AND_STALL,
+        last_reply: finalContent,
+        should_exit: false
+      }
+    };
   }
 
-  // Phase 2.7: Anti-repetition using session's last_reply
-  if (isTooSimilar(finalContent, lastAgentMessage)) {
-    console.log(`⚠️ Repetition detected (compared to session.last_reply), regenerating via LLM...`);
+  // Pick a random response from templates for this goal
+  const templates = RESPONSE_TEMPLATES[currentGoal];
+  let finalContent = templates[Math.floor(Math.random() * templates.length)];
 
-    const retryResult = await chat.sendMessage(
-      "STOP! Too similar to last message. Generate COMPLETELY DIFFERENT response with different wording. Same goal, new words."
-    );
-    const retryParsed = JSON.parse(retryResult.response.text());
-    finalContent = retryParsed.reply_content;
+  // FIX ISSUE #1 (Repetition): Anti-repetition guard - check against recent history
+  // Get last 3 agent messages to avoid repeating same phrase across goals
+  const recentAgentMessages = history
+    .filter(m => m.sender === 'agent')
+    .slice(-3)
+    .map(m => m.content);
 
-    if (!finalContent) {
-      throw new Error("LLM retry failed to return 'reply_content'");
-    }
-
-    console.log(`✅ Regenerated via LLM: "${finalContent.substring(0, 60)}..."`);
+  let attempts = 0;
+  while (
+    (recentAgentMessages.includes(finalContent) || finalContent === session.agent_state.last_reply) &&
+    templates.length > 1 &&
+    attempts < 10  // Increased from 5 to 10 for better coverage
+  ) {
+    finalContent = templates[Math.floor(Math.random() * templates.length)];
+    attempts++;
   }
 
-  console.log(`📤 Final: "${finalContent}"`);
+  console.log(`🤖 [MOCK] Goal: ${currentGoal} | Response: "${finalContent}"`);
 
-  // Phase 2.8: Check if session should exit
   const shouldExit = currentGoal === AgentGoal.EXIT_SAFELY;
 
   return {
@@ -354,15 +275,14 @@ export async function generateAgentResponse(
       current_goal: currentGoal,
       emotional_state: GOAL_TO_EMOTION[currentGoal],
       perceived_risk: GOAL_TO_RISK[currentGoal],
-      confidence_of_scam: parsed.metadata?.confidence_of_scam || 0.7,
+      confidence_of_scam: 0.7,
       intelligence_gaps: intelligence,
     },
-    // Phase 2.3-2.8: Return data for session update
     session_updates: {
-      has_initiated: true,  // Phase 2.4: Mark as initiated
-      current_goal: currentGoal,  // Phase 2.5: Store new goal
-      last_reply: finalContent,  // Phase 2.7: Store for anti-repetition
-      should_exit: shouldExit  // Phase 2.8: Signal exit
+      has_initiated: true,
+      current_goal: currentGoal,
+      last_reply: finalContent,
+      should_exit: shouldExit
     }
   };
 }

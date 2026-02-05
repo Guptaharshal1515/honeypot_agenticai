@@ -9,21 +9,16 @@ export type IntelItem = {
 
 export function analyzeMessageForIntel(content: string): IntelItem[] {
   const intel: IntelItem[] = [];
-  
-  // UPI ID Regex (Improved: Handles standard VPA formats)
-  const upiRegex = /\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b/g;
-  const upiMatches = content.match(upiRegex);
-  if (upiMatches) {
-    upiMatches.forEach(match => {
-      intel.push({ type: 'upi', value: match, context: 'Detected UPI VPA' });
-    });
-  }
+  const extractedValues = new Set<string>(); // FIX ISSUE #3: Track to prevent double-classification
 
-  // Bank Details (Improved: Looking for IFSC codes and Account numbers in context)
+  // PRIORITY ORDER: Bank > UPI > Phone (prevents overlap)
+
+  // 1. Bank Details FIRST (Highest priority - most specific)
   const ifscRegex = /\b[A-Z]{4}0[A-Z0-9]{6}\b/g;
   const ifscMatches = content.match(ifscRegex);
   if (ifscMatches) {
     ifscMatches.forEach(match => {
+      extractedValues.add(match);
       intel.push({ type: 'bank_account', value: match, context: 'Detected Bank IFSC Code' });
     });
   }
@@ -32,29 +27,53 @@ export function analyzeMessageForIntel(content: string): IntelItem[] {
   const accMatches = content.match(accRegex);
   if (accMatches) {
     accMatches.forEach(match => {
-      // Look for keywords nearby in content to reduce false positives
-      const lowerContent = content.toLowerCase();
-      if (lowerContent.includes('account') || lowerContent.includes('acc') || lowerContent.includes('bank') || lowerContent.includes('transfer')) {
-        intel.push({ type: 'bank_account', value: match, context: 'Detected potential bank account number' });
+      // Only extract if not already classified AND has banking context
+      if (!extractedValues.has(match)) {
+        const lowerContent = content.toLowerCase();
+        if (lowerContent.includes('account') || lowerContent.includes('acc') || lowerContent.includes('bank') || lowerContent.includes('transfer')) {
+          extractedValues.add(match);
+          intel.push({ type: 'bank_account', value: match, context: 'Detected potential bank account number' });
+        }
       }
     });
   }
 
-  // URL Regex (Improved: Excludes common safe domains if needed, but here we want all)
+  // 2. UPI ID (Second priority)
+  const upiRegex = /\b[a-zA-Z0-9.\-_]{2,256}@[a-zA-Z]{2,64}\b/g;
+  const upiMatches = content.match(upiRegex);
+  if (upiMatches) {
+    upiMatches.forEach(match => {
+      if (!extractedValues.has(match)) {
+        extractedValues.add(match);
+        intel.push({ type: 'upi', value: match, context: 'Detected UPI VPA' });
+      }
+    });
+  }
+
+  // 3. URL (FIX ISSUE #6: Label as contextual, not definitive phishing)
   const urlRegex = /(https?:\/\/[^\s]+)/g;
   const urlMatches = content.match(urlRegex);
   if (urlMatches) {
     urlMatches.forEach(match => {
-      intel.push({ type: 'url', value: match, context: 'Detected Phishing/Suspicious Link' });
+      if (!extractedValues.has(match)) {
+        extractedValues.add(match);
+        // Changed from "Detected Phishing/Suspicious Link" to contextual label
+        intel.push({ type: 'url', value: match, context: 'Suspicious link (contextual - verify legitimacy)' });
+      }
     });
   }
 
-  // Phone Number (Improved: Common international and local formats)
+  // 4. Phone Number (LAST priority - most generic pattern)
   const phoneRegex = /(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}/g;
   const phoneMatches = content.match(phoneRegex);
   if (phoneMatches) {
     phoneMatches.forEach(match => {
-      intel.push({ type: 'phone', value: match.replace(/[^\d+]/g, ''), context: 'Detected contact phone number' });
+      const normalized = match.replace(/[^\d+]/g, '');
+      // FIX ISSUE #3: Skip if already classified as bank account
+      if (!extractedValues.has(normalized) && !extractedValues.has(match)) {
+        extractedValues.add(normalized);
+        intel.push({ type: 'phone', value: normalized, context: 'Detected contact phone number' });
+      }
     });
   }
 

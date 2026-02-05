@@ -9,6 +9,7 @@ export type Session = {
         has_initiated: boolean;  // Phase 2.4: First message control
         current_goal: string | null;  // Phase 2.5: Goal tracking
         last_reply: string | null;  // Phase 2.7: Anti-repetition
+        is_paused: boolean;  // FIX #1: Explicit pause/resume control
     };
 
     // Phase 2.6: Extraction-aware intel storage
@@ -37,7 +38,8 @@ export function getOrCreateSession(conversation_id: string): Session {
             agent_state: {
                 has_initiated: false,
                 current_goal: null,
-                last_reply: null  // Phase 2.7
+                last_reply: null,  // Phase 2.7
+                is_paused: false  // FIX #1: Start unpaused
             },
             extracted_intel: {
                 upi_ids: [],
@@ -58,4 +60,9 @@ export function getOrCreateSession(conversation_id: string): Session {
 // Optional: helper for debugging / future cleanup
 export function getSessionCount(): number {
     return sessions.size;
+}
+
+// FIX #2: Get existing session without creating
+export function getSession(conversation_id: string): Session | undefined {
+    return sessions.get(conversation_id);
 }

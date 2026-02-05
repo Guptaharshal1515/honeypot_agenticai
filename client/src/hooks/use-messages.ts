@@ -25,7 +25,11 @@ export function useSendMessage() {
       const res = await fetch(url, {
         method: api.messages.create.method,
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ content, sender }),
+        body: JSON.stringify({
+          conversation_id: conversationId,  // FIX: Backend requires this (Phase 2.1)
+          content,
+          sender
+        }),
       });
       if (!res.ok) throw new Error("Failed to send message");
       return api.messages.create.responses[201].parse(await res.json());
@@ -34,6 +38,8 @@ export function useSendMessage() {
       queryClient.invalidateQueries({ queryKey: [api.messages.list.path, variables.conversationId] });
       // Also refetch conversation to get updated stats if any
       queryClient.invalidateQueries({ queryKey: [api.conversations.get.path, variables.conversationId] });
+      // FIX: Also invalidate conversation state
+      queryClient.invalidateQueries({ queryKey: ["/api/conversations/:id/state", variables.conversationId] });
     },
   });
 }

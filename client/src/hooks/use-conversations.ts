@@ -83,3 +83,50 @@ export function useClearConversation() {
     },
   });
 }
+
+// ============================================================================
+// FIX #2: CONVERSATION STATE - SINGLE SOURCE OF TRUTH
+// ============================================================================
+export function useConversationState(id: number | null) {
+  return useQuery({
+    queryKey: ["/api/conversations/:id/state", id],
+    queryFn: async () => {
+      if (!id) return null;
+      const url = `/api/conversations/${id}/state`;
+      const res = await fetch(url);
+      if (res.status === 404) return null;
+      if (!res.ok) throw new Error("Failed to fetch conversation state");
+      return await res.json();
+    },
+    enabled: !!id,
+    refetchInterval: 1000, // Poll for state changes frequently
+  });
+}
+
+// ============================================================================
+// FIX #3: RESUME AGENT - BACKEND TRIGGER
+// ============================================================================
+export function useResumeAgent() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: async (conversationId: number) => {
+      const url = `/api/conversations/${conversationId}/resume`;
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+      if (!res.ok) {
+        const error = await res.json();
+        throw new Error(error.error || "Failed to resume agent");
+      }
+      return await res.json();
+    },
+    onSuccess: (_, conversationId) => {
+      // Invalidate all related queries to refetch fresh state
+      queryClient.invalidateQueries({ queryKey: ["/api/conversations/:id/state", conversationId] });
+      queryClient.invalidateQueries({ queryKey: [api.messages.list.path, conversationId] });
+      queryClient.invalidateQueries({ queryKey: [api.conversations.get.path, conversationId] });
+      queryClient.invalidateQueries({ queryKey: [api.conversations.list.path] });
+    },
+  });
+}
